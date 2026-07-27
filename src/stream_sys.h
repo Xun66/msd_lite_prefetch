@@ -33,6 +33,7 @@
 
 
 #include <sys/queue.h>
+#include <pthread.h>
 #include <time.h>
 
 #include "utils/macro.h"
@@ -40,6 +41,8 @@
 #include "utils/io_buf.h"
 #include "threadpool/threadpool_task.h"
 #include "utils/ring_buffer.h"
+#include "channel_predict.h"
+#include "mpegts_gop.h"
 
 
 typedef struct str_hub_s	*str_hub_p;
@@ -65,6 +68,7 @@ TAILQ_HEAD(str_hub_cli_head, str_hub_cli_s);
 
 /* Flags. */
 #define STR_HUB_CLI_STATE_F_RPOS_INITIALIZED	(((uint32_t)1) << 0)
+#define STR_HUB_CLI_STATE_F_PSI_SENDED		(((uint32_t)1) << 1)
 #define STR_HUB_CLI_STATE_F_HTTP_HDRS_SENDED	(((uint32_t)1) << 8)
 /* Limit for User-Agent len. */
 #define STR_HUB_CLI_USER_AGENT_MAX_SIZE	256
@@ -98,7 +102,7 @@ typedef struct str_hub_settings_s {
 #define STR_HUB_S_F_SKT_TCP_NOPUSH		(((uint32_t)1) << 12) /* Enable TCP_NOPUSH for clients. */
 /* Default values. */
 #define STR_HUB_S_DEF_FLAGS		(0)
-#define STR_HUB_S_DEF_RING_BUF_SIZE	(1 * 1024) /* kb */
+#define STR_HUB_S_DEF_RING_BUF_SIZE	(8 * 1024) /* kb: >= one 40 Mbit/s GOP */
 #define STR_HUB_S_DEF_PRECAHE		(1 * 1024) /* kb */
 #define STR_HUB_S_DEF_SND_BLOCK_MIN_SIZE (64) /* kb */
 #define STR_HUB_S_DEF_SKT_SND_BUF	(256)	/* kb */
@@ -133,6 +137,43 @@ typedef struct str_src_settings_s {
 #define STR_SRC_S_DEF_SKT_RCV_LOWAT	(48)	/* kb */
 #define STR_SRC_S_DEF_UDP_RCV_TIMEOUT	(2)	/* s */
 
+#define STR_PREFETCH_STATE_FILE_MAX	511
+
+typedef struct str_prefetch_settings_s {
+	uint32_t flags;
+	uint32_t next_count;
+	uint32_t previous_count;
+	uint32_t min_observations;
+	size_t max_channels;
+	size_t max_entries;
+	uint64_t entry_ttl;
+	uint64_t max_entry_ttl;
+	size_t protected_per_channel;
+	uint64_t observation_cap;
+	uint64_t idle_timeout;
+	char state_file[STR_PREFETCH_STATE_FILE_MAX + 1];
+} str_prefetch_settings_t, *str_prefetch_settings_p;
+
+#define STR_PREFETCH_F_ENABLE		(((uint32_t)1) << 0)
+#define STR_PREFETCH_F_PREVIOUS		(((uint32_t)1) << 1)
+#define STR_PREFETCH_DEF_FLAGS		0 /* Old configs retain the cold-request behavior. */
+#define STR_PREFETCH_DEF_NEXT_COUNT	1
+#define STR_PREFETCH_DEF_PREVIOUS_COUNT	1
+#define STR_PREFETCH_DEF_MIN_OBSERVATIONS 2
+#define STR_PREFETCH_DEF_MAX_CHANNELS	512
+#define STR_PREFETCH_DEF_MAX_ENTRIES	4096
+#define STR_PREFETCH_DEF_ENTRY_TTL	604800 /* seven days */
+#define STR_PREFETCH_DEF_MAX_ENTRY_TTL	2592000 /* 30 days */
+#define STR_PREFETCH_DEF_PROTECTED_PER_CHANNEL 4
+#define STR_PREFETCH_DEF_OBSERVATION_CAP 25
+#define STR_PREFETCH_TARGET_MAX		4
+#define STR_PREFETCH_DEF_IDLE_TIMEOUT	60
+#define STR_PREFETCH_SAVE_INTERVAL	600 /* Save dirty training every 10 min. */
+#define STR_PREFETCH_DEF_STATE_FILE	"/etc/msd_lite/prefetch.state"
+
+/* Additional prefetch settings. */
+/* Kept after the numeric fields for simple XML loading. */
+
 
 /*
  * Auto generated channel name:
@@ -158,6 +199,15 @@ typedef struct str_hub_s {
 	tp_task_p	tptask;		/* Data/Packets receiver. */
 	uintptr_t	r_buf_fd;	/* r_buf shared memory file descriptor */
 	r_buf_p		r_buf;		/* Ring buf, write pos. */
+	mpegts_gop_parser_t gop_parser;
+	r_buf_rpos_t	segment_rpos;	/* Most recent PAT before a random access point. */
+	r_buf_rpos_t	gop_rpos;	/* Safe startup position for new clients. */
+	r_buf_rpos_t	video_unit_rpos; /* PES/access-unit start preceding IDR/CRA. */
+	r_buf_rpos_t	codec_config_rpos; /* PES carrying recent VPS/SPS/PPS. */
+	uint8_t		segment_rpos_valid;
+	uint8_t		gop_rpos_valid;
+	uint8_t		video_unit_rpos_valid;
+	uint8_t		codec_config_rpos_valid;
 #ifdef __linux__ /* Linux specific code. */
 	size_t		r_buf_rcvd;	/* Ring buf LOWAT emulator. */
 #endif /* Linux specific code. */
@@ -194,16 +244,27 @@ typedef struct str_hubs_bckt_s {
 	uint8_t		base_http_hdrs[512];
 	str_hub_settings_t hub_params;	/* Settings. */
 	str_src_settings_t src_params;	/* Settings. */
+	str_prefetch_settings_t prefetch_params;
+	ch_predict_p	predict;
+	pthread_mutex_t	prefetch_lock;
+	ch_predict_target_t prefetch_targets[STR_PREFETCH_TARGET_MAX];
+	size_t		prefetch_target_count;
+	time_t		last_real_client_time;
+	time_t		last_predict_save_time;
+	uint64_t	prefetch_idle_timeout;
+	char		predict_state_file[STR_PREFETCH_STATE_FILE_MAX + 1];
 } str_hubs_bckt_t;
 
 
 void	str_hub_settings_def(str_hub_settings_p p_ret);
 void	str_src_settings_def(str_src_settings_p p_ret);
 void	str_src_conn_def(str_src_conn_params_p src_conn_params);
+void	str_prefetch_settings_def(str_prefetch_settings_p p_ret);
 
 
 int	str_hubs_bckt_create(tp_p tp, const char *app_ver,
 	    str_hub_settings_p hub_params, str_src_settings_p src_params,
+	    str_prefetch_settings_p prefetch_params,
 	    str_hubs_bckt_p *shbskt_ret);
 void	str_hubs_bckt_destroy(str_hubs_bckt_p shbskt);
 

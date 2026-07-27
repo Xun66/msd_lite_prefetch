@@ -1,6 +1,8 @@
 
 set(MSD_LITE_BIN	msd_lite.c
+			channel_predict.c
 			msd_lite_stat_text.c
+			mpegts_gop.c
 			stream_sys.c
 			liblcb/src/net/socket.c
 			liblcb/src/net/socket_address.c
@@ -24,6 +26,16 @@ target_compile_definitions(msd_lite PRIVATE -DHTTP_SRV_XML_CONFIG)
 target_compile_definitions(msd_lite PRIVATE -DSOCKET_XML_CONFIG)
 target_compile_definitions(msd_lite PRIVATE -DTHREAD_POOL_SETTINGS_XML)
 set_target_properties(msd_lite PROPERTIES LINKER_LANGUAGE C)
-target_link_libraries(msd_lite ${CMAKE_REQUIRED_LIBRARIES} ${CMAKE_EXE_LINKER_FLAGS})
+target_link_libraries(msd_lite PRIVATE Threads::Threads
+	${CMAKE_REQUIRED_LIBRARIES} ${CMAKE_EXE_LINKER_FLAGS})
 
 install(TARGETS msd_lite RUNTIME DESTINATION bin)
+
+if (ENABLE_TESTS)
+	add_executable(test_prefetch
+		../tests/test_prefetch.c
+		channel_predict.c
+		mpegts_gop.c)
+	target_link_libraries(test_prefetch PRIVATE Threads::Threads)
+	add_test(NAME test_prefetch COMMAND test_prefetch)
+endif()

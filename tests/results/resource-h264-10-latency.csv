@@ -1,0 +1,11 @@
+round,cold_ms,cold_rc,warm_ms,warm_rc,order
+1,2273,0,2006,0,cold-warm
+2,2360,0,2075,0,warm-cold
+3,2271,0,2267,0,cold-warm
+4,2392,0,1987,0,warm-cold
+5,2329,0,2264,0,cold-warm
+6,2546,0,1945,0,warm-cold
+7,2338,0,2089,0,cold-warm
+8,2392,0,1988,0,warm-cold
+9,2267,0,2328,0,cold-warm
+10,2373,0,2027,0,warm-cold

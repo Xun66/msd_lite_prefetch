@@ -77,6 +77,11 @@ typedef struct str_hub_cli_attach_cb_data_s {
 	str_src_conn_params_t src_conn_params;
 } str_hub_cli_attach_cb_data_t, *str_hub_cli_attach_cb_data_p;
 
+typedef struct str_hub_prefetch_cb_data_s {
+	str_hubs_bckt_p shbskt;
+	ch_predict_target_t target;
+} str_hub_prefetch_cb_data_t, *str_hub_prefetch_cb_data_p;
+
 
 
 typedef struct str_hubs_bckt_enum_data_s { /* thread message sync data. */
@@ -107,6 +112,9 @@ int	str_hub_create_int(str_hubs_bckt_p shbskt, tpt_p tpt,
 void	str_hub_destroy_int(str_hub_p str_hub);
 
 void	str_hub_cli_attach_msg_cb(tpt_p tpt, void *udata);
+static void str_hub_prefetch_msg_cb(tpt_p tpt, void *udata);
+static void str_hub_prefetch_update(str_hubs_bckt_p shbskt,
+	    ch_predict_target_t *targets, size_t target_count);
 
 int	str_hub_send_to_client(str_hub_p str_hub, str_hub_cli_p strh_cli,
 	    size_t *transfered_size);
@@ -171,12 +179,34 @@ str_src_conn_def(str_src_conn_params_p src_conn_params) {
 	src_conn_params->mc.rejoin_time = 0;
 }
 
+void
+str_prefetch_settings_def(str_prefetch_settings_p p) {
+	if (NULL == p)
+		return;
+	memset(p, 0, sizeof(*p));
+	p->flags = STR_PREFETCH_DEF_FLAGS;
+	p->next_count = STR_PREFETCH_DEF_NEXT_COUNT;
+	p->previous_count = STR_PREFETCH_DEF_PREVIOUS_COUNT;
+	p->min_observations = STR_PREFETCH_DEF_MIN_OBSERVATIONS;
+	p->max_channels = STR_PREFETCH_DEF_MAX_CHANNELS;
+	p->max_entries = STR_PREFETCH_DEF_MAX_ENTRIES;
+	p->entry_ttl = STR_PREFETCH_DEF_ENTRY_TTL;
+	p->max_entry_ttl = STR_PREFETCH_DEF_MAX_ENTRY_TTL;
+	p->protected_per_channel = STR_PREFETCH_DEF_PROTECTED_PER_CHANNEL;
+	p->observation_cap = STR_PREFETCH_DEF_OBSERVATION_CAP;
+	p->idle_timeout = STR_PREFETCH_DEF_IDLE_TIMEOUT;
+	memcpy(p->state_file, STR_PREFETCH_DEF_STATE_FILE,
+	    sizeof(STR_PREFETCH_DEF_STATE_FILE));
+}
+
 
 int
 str_hubs_bckt_create(tp_p tp, const char *app_ver, str_hub_settings_p hub_params,
-    str_src_settings_p src_params, str_hubs_bckt_p *shbskt_ret) {
+    str_src_settings_p src_params, str_prefetch_settings_p prefetch_params,
+    str_hubs_bckt_p *shbskt_ret) {
 	int error;
 	str_hubs_bckt_p shbskt;
+	ch_predict_settings_t predict_settings;
 	char osver[128];
 	size_t i, thread_count_max;
 
@@ -193,6 +223,39 @@ str_hubs_bckt_create(tp_p tp, const char *app_ver, str_hub_settings_p hub_params
 	}
 	for (i = 0; i < thread_count_max; i ++) {
 		TAILQ_INIT(&shbskt->thr_data[i].hub_head);
+	}
+	pthread_mutex_init(&shbskt->prefetch_lock, NULL);
+	if (NULL != prefetch_params) {
+		memcpy(&shbskt->prefetch_params, prefetch_params,
+		    sizeof(*prefetch_params));
+	}
+	shbskt->prefetch_idle_timeout = shbskt->prefetch_params.idle_timeout;
+	memcpy(shbskt->predict_state_file,
+	    shbskt->prefetch_params.state_file,
+	    sizeof(shbskt->predict_state_file));
+	shbskt->last_real_client_time = time(NULL);
+	shbskt->last_predict_save_time = shbskt->last_real_client_time;
+	if (0 != (shbskt->prefetch_params.flags & STR_PREFETCH_F_ENABLE)) {
+		predict_settings.max_channels = shbskt->prefetch_params.max_channels;
+		predict_settings.max_edges = shbskt->prefetch_params.max_entries;
+		predict_settings.entry_ttl = shbskt->prefetch_params.entry_ttl;
+		predict_settings.max_entry_ttl =
+		    shbskt->prefetch_params.max_entry_ttl;
+		predict_settings.protected_per_channel =
+		    shbskt->prefetch_params.protected_per_channel;
+		predict_settings.observation_cap =
+		    shbskt->prefetch_params.observation_cap;
+		predict_settings.min_observations =
+		    shbskt->prefetch_params.min_observations;
+		error = ch_predict_create(&predict_settings, &shbskt->predict);
+		if (0 != error)
+			goto err_out;
+		error = ch_predict_load(shbskt->predict,
+		    shbskt->predict_state_file);
+		if (0 != error) {
+			SYSLOG_ERR(LOG_WARNING, error,
+			    "Unable to load channel prediction state");
+		}
 	}
 	/* Stream Hub Params */
 	memcpy(&shbskt->hub_params, hub_params, sizeof(str_hub_settings_t));
@@ -266,6 +329,10 @@ str_hubs_bckt_create(tp_p tp, const char *app_ver, str_hub_settings_p hub_params
 	return (0);
 
 err_out:
+	if (NULL != shbskt->thr_data) {
+		ch_predict_destroy(shbskt->predict);
+		pthread_mutex_destroy(&shbskt->prefetch_lock);
+	}
 	free(shbskt->thr_data);
 	free(shbskt);
 	return (error);
@@ -282,6 +349,10 @@ str_hubs_bckt_destroy(str_hubs_bckt_p shbskt) {
 	    (TP_MSG_F_SELF_DIRECT | TP_MSG_F_FORCE | TP_MSG_F_FAIL_DIRECT | TP_BMSG_F_SYNC),
 	    str_hubs_bckt_destroy_msg_cb, shbskt);
 
+	if (NULL != shbskt->predict)
+		ch_predict_save(shbskt->predict, shbskt->predict_state_file);
+	ch_predict_destroy(shbskt->predict);
+	pthread_mutex_destroy(&shbskt->prefetch_lock);
 	free(shbskt->thr_data);
 	free(shbskt);
 }
@@ -400,12 +471,29 @@ str_hubs_bckt_timer_service(str_hubs_bckt_p shbskt, str_hub_p str_hub,
 
 	/* Check hub. */
 	if (0 == str_hub->cli_count) {
+		int keep = 0;
+		size_t i;
+		pthread_mutex_lock(&shbskt->prefetch_lock);
+		for (i = 0; i < shbskt->prefetch_target_count; i++) {
+			if (str_hub->name_size ==
+			    shbskt->prefetch_targets[i].name_size &&
+			    0 == memcmp(str_hub->name,
+			    shbskt->prefetch_targets[i].name,
+			    str_hub->name_size)) {
+				keep = 1;
+				break;
+			}
+		}
+		pthread_mutex_unlock(&shbskt->prefetch_lock);
+		if (keep)
+			goto traffic_check;
 		syslog(LOG_INFO, "%s: No more clients, selfdestroy.",
 		    str_hub->name);
 		str_hub_destroy_int(str_hub);
 		return;
 	}
 	/* No traffic check. */
+traffic_check:
 	if (0 != src_params->rcv_timeout) {
 		tmt = (str_hub->tp_last_recv.tv_sec + (time_t)src_params->rcv_timeout);
 		if (tmt < tp->tv_sec ||
@@ -448,10 +536,35 @@ str_hubs_bckt_timer_msg_cb(tpt_p tpt, void *udata) {
 static void
 str_hubs_bckt_timer_cb(tp_event_p ev __unused, tp_udata_p tp_udata) {
 	str_hubs_bckt_p shbskt = (str_hubs_bckt_p)tp_udata->ident;
+	size_t i, real_client_count = 0;
+	time_t now;
 
 	//SYSLOGD_EX(LOG_DEBUG, "...");
 	if (NULL == shbskt)
 		return;
+	now = time(NULL);
+	for (i = 0; i < tp_thread_count_max_get(shbskt->tp); i++)
+		real_client_count += shbskt->thr_data[i].stat.cli_count;
+	pthread_mutex_lock(&shbskt->prefetch_lock);
+	if (0 != real_client_count) {
+		shbskt->last_real_client_time = now;
+	} else if (0 != shbskt->prefetch_idle_timeout &&
+	    (uint64_t)(now - shbskt->last_real_client_time) >=
+	    shbskt->prefetch_idle_timeout &&
+	    0 != shbskt->prefetch_target_count) {
+		shbskt->prefetch_target_count = 0;
+		syslog(LOG_INFO, "No real clients for %" PRIu64
+		    " seconds: all prediction prefetch streams stopped.",
+		    shbskt->prefetch_idle_timeout);
+	}
+	pthread_mutex_unlock(&shbskt->prefetch_lock);
+	if (NULL != shbskt->predict &&
+	    (now - shbskt->last_predict_save_time) >=
+	    STR_PREFETCH_SAVE_INTERVAL) {
+		ch_predict_save(shbskt->predict,
+		    shbskt->predict_state_file);
+		shbskt->last_predict_save_time = now;
+	}
 	memcpy(&shbskt->tp_last_tmr, &shbskt->tp_last_tmr_next, sizeof(struct timespec));
 	clock_gettime(CLOCK_MONOTONIC_FAST, &shbskt->tp_last_tmr_next);
 	/* Broadcast to all threads. */
@@ -485,6 +598,7 @@ str_hub_create_int(str_hubs_bckt_p shbskt, tpt_p tpt, uint8_t *name, size_t name
 	str_hub->tpt = tpt;
 	clock_gettime(CLOCK_MONOTONIC_FAST, &str_hub->tp_last_recv);
 	str_hub->r_buf_fd = (uintptr_t)-1;
+	mpegts_gop_parser_init(&str_hub->gop_parser);
 
 	src_params = &shbskt->src_params;
 	memcpy(&str_hub->src_conn_params, src_conn_params, sizeof(str_src_conn_params_t));
@@ -643,6 +757,9 @@ str_hub_cli_attach(str_hubs_bckt_p shbskt, str_hub_cli_p strh_cli,
 	int error;
 	tpt_p tpt;
 	str_hub_cli_attach_cb_data_p cli_data;
+	ch_predict_target_t next[2], prev, targets[STR_PREFETCH_TARGET_MAX];
+	size_t next_count = 0, target_count = 0, i;
+	int have_prev = 0;
 
 	if (NULL == shbskt || NULL == strh_cli || NULL == hub_name ||
 	    0 == hub_name_size || NULL == src_conn_params)
@@ -657,6 +774,30 @@ str_hub_cli_attach(str_hubs_bckt_p shbskt, str_hub_cli_p strh_cli,
 	cli_data->hub_name[hub_name_size] = 0;
 	cli_data->hub_name_size = hub_name_size;
 	memcpy(&cli_data->src_conn_params, src_conn_params, sizeof(str_src_conn_params_t));
+
+	if (NULL != shbskt->predict) {
+		pthread_mutex_lock(&shbskt->prefetch_lock);
+		shbskt->last_real_client_time = time(NULL);
+		pthread_mutex_unlock(&shbskt->prefetch_lock);
+		error = ch_predict_observe(shbskt->predict, &strh_cli->xreal_addr,
+		    hub_name, hub_name_size, &src_conn_params->udp.addr,
+		    src_conn_params->mc.if_index,
+		    src_conn_params->mc.rejoin_time, next, &next_count,
+		    &prev, &have_prev);
+		if (0 == error) {
+			for (i = 0; i < next_count &&
+			    i < shbskt->prefetch_params.next_count &&
+			    target_count < STR_PREFETCH_TARGET_MAX; i++)
+				targets[target_count++] = next[i];
+			if (have_prev &&
+			    0 != (shbskt->prefetch_params.flags &
+			    STR_PREFETCH_F_PREVIOUS) &&
+			    0 != shbskt->prefetch_params.previous_count &&
+			    target_count < STR_PREFETCH_TARGET_MAX)
+				targets[target_count++] = prev;
+			str_hub_prefetch_update(shbskt, targets, target_count);
+		}
+	}
 	
 	tpt = str_hub_tpt_get_by_name(shbskt->tp, hub_name, hub_name_size);
 	error = tpt_msg_send(tpt, NULL, TP_MSG_F_SELF_DIRECT,
@@ -666,6 +807,67 @@ str_hub_cli_attach(str_hubs_bckt_p shbskt, str_hub_cli_p strh_cli,
 	}
 
 	return (error);
+}
+
+static void
+str_hub_prefetch_update(str_hubs_bckt_p shbskt,
+    ch_predict_target_t *targets, size_t target_count) {
+	str_hub_prefetch_cb_data_p data;
+	tpt_p tpt;
+	size_t i;
+
+	target_count = MIN(target_count, STR_PREFETCH_TARGET_MAX);
+	pthread_mutex_lock(&shbskt->prefetch_lock);
+	shbskt->prefetch_target_count = target_count;
+	if (target_count)
+		memcpy(shbskt->prefetch_targets, targets,
+		    target_count * sizeof(*targets));
+	pthread_mutex_unlock(&shbskt->prefetch_lock);
+
+	for (i = 0; i < target_count; i++) {
+		data = calloc(1, sizeof(*data));
+		if (NULL == data)
+			continue;
+		data->shbskt = shbskt;
+		data->target = targets[i];
+		tpt = str_hub_tpt_get_by_name(shbskt->tp, targets[i].name,
+		    targets[i].name_size);
+		if (0 != tpt_msg_send(tpt, NULL, TP_MSG_F_SELF_DIRECT,
+		    str_hub_prefetch_msg_cb, data))
+			free(data);
+	}
+}
+
+static void
+str_hub_prefetch_msg_cb(tpt_p tpt, void *udata) {
+	str_hub_prefetch_cb_data_p data = udata;
+	str_hub_p hub;
+	str_src_conn_params_t params;
+	size_t thread_num;
+	int found = 0;
+
+	thread_num = tpt_get_num(tpt);
+	TAILQ_FOREACH(hub, &data->shbskt->thr_data[thread_num].hub_head, next) {
+		if (hub->name_size == data->target.name_size &&
+		    0 == memcmp(hub->name, data->target.name, hub->name_size)) {
+			found = 1;
+			break;
+		}
+	}
+	if (!found) {
+		memset(&params, 0, sizeof(params));
+		memcpy(&params.udp.addr, &data->target.addr,
+		    sizeof(data->target.addr));
+		params.mc.if_index = data->target.if_index;
+		params.mc.rejoin_time = data->target.rejoin_time;
+		if (0 == str_hub_create_int(data->shbskt, tpt,
+		    data->target.name, data->target.name_size, &params, &hub)) {
+			syslog(LOG_INFO, "%s: prediction prefetch started "
+			    "(observations=%" PRIu64 ").", data->target.name,
+			    data->target.observations);
+		}
+	}
+	free(data);
 }
 void
 str_hub_cli_attach_msg_cb(tpt_p tpt, void *udata) {
@@ -831,11 +1033,39 @@ str_hub_send_to_clients(str_hub_p str_hub) {
 			strh_cli->offset = 0;
 			strh_cli->flags |= STR_HUB_CLI_STATE_F_HTTP_HDRS_SENDED;
 		}
+		/* Send current PAT/PMT before starting exactly at the video GOP. */
+		if (0 == (STR_HUB_CLI_STATE_F_PSI_SENDED & strh_cli->flags)) {
+			size_t psi_size = str_hub->gop_parser.psi_size;
+			if (0 == psi_size) {
+				strh_cli->flags |= STR_HUB_CLI_STATE_F_PSI_SENDED;
+			} else {
+				ios = send((int)strh_cli->skt,
+				    str_hub->gop_parser.psi + strh_cli->offset,
+				    psi_size - strh_cli->offset,
+				    (MSG_DONTWAIT | MSG_NOSIGNAL));
+				if (-1 == ios) {
+					error = SKT_ERR_FILTER(errno);
+					goto error_on_send;
+				}
+				strh_cli->offset += (size_t)ios;
+				if (strh_cli->offset < psi_size)
+					continue;
+				strh_cli->offset = 0;
+				strh_cli->flags |= STR_HUB_CLI_STATE_F_PSI_SENDED;
+			}
+		}
 		/* Init uninitialized client rpos. */
 		if (0 == (STR_HUB_CLI_STATE_F_RPOS_INITIALIZED & strh_cli->flags)) {
 			strh_cli->flags |= STR_HUB_CLI_STATE_F_RPOS_INITIALIZED;
-			r_buf_rpos_init(str_hub->r_buf, &strh_cli->rpos,
-			    str_hub->shbskt->hub_params.precache);
+			if (str_hub->gop_rpos_valid &&
+			    r_buf_rpos_check_fast(str_hub->r_buf,
+			    &str_hub->gop_rpos)) {
+				memcpy(&strh_cli->rpos, &str_hub->gop_rpos,
+				    sizeof(strh_cli->rpos));
+			} else {
+				r_buf_rpos_init(str_hub->r_buf, &strh_cli->rpos,
+				    str_hub->shbskt->hub_params.precache);
+			}
 		}
 		error = str_hub_send_to_client(str_hub, strh_cli, &transfered_size);
 error_on_send:
@@ -867,6 +1097,8 @@ str_src_recv_mc_cb(tp_task_p tptask, int error, uint32_t eof __unused,
 	ssize_t ios;
 	uint8_t *buf;
 	size_t transfered_size = 0, req_buf_size, buf_size, start_off = 0, end_off = 0;
+	r_buf_rpos_t write_rpos;
+	mpegts_gop_event_t gop_event;
 
 	if (0 != error) {
 err_out:
@@ -917,7 +1149,41 @@ err_out:
 		} else {
 			continue; /* Packet unknown, drop. */
 		}
-		r_buf_wbuf_set2(str_hub->r_buf, buf, buf_size, NULL);
+		r_buf_wbuf_set2(str_hub->r_buf, buf, buf_size, &write_rpos);
+		mpegts_gop_parse(&str_hub->gop_parser, buf, buf_size,
+		    &gop_event);
+		if (gop_event.video_unit_start) {
+			str_hub->video_unit_rpos = write_rpos;
+			str_hub->video_unit_rpos.iov_off =
+			    gop_event.video_unit_offset;
+			str_hub->video_unit_rpos_valid = 1;
+		}
+		if (gop_event.codec_config &&
+		    str_hub->video_unit_rpos_valid) {
+			str_hub->codec_config_rpos =
+			    str_hub->video_unit_rpos;
+			str_hub->codec_config_rpos_valid = 1;
+		}
+		if (gop_event.pat) {
+			str_hub->segment_rpos = write_rpos;
+			str_hub->segment_rpos_valid = 1;
+		}
+		if (gop_event.random_access) {
+			if (str_hub->codec_config_rpos_valid &&
+			    r_buf_rpos_check_fast(str_hub->r_buf,
+			    &str_hub->codec_config_rpos)) {
+				str_hub->gop_rpos =
+				    str_hub->codec_config_rpos;
+			} else if (str_hub->segment_rpos_valid &&
+			    r_buf_rpos_check_fast(str_hub->r_buf,
+			    &str_hub->segment_rpos)) {
+				str_hub->gop_rpos =
+				    str_hub->segment_rpos;
+			} else {
+				str_hub->gop_rpos = write_rpos;
+			}
+			str_hub->gop_rpos_valid = 1;
+		}
 	} /* end recv while */
 	if (0 != error) {
 		SYSLOG_ERR(LOG_NOTICE, error, "recv().");

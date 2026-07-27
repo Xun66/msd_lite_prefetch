@@ -45,8 +45,15 @@ include(CheckFunctionExists)
 include(CheckSymbolExists)
 include(CheckCCompilerFlag)
 
-find_library(PTHREAD_LIBRARY pthread)
-list(APPEND CMAKE_REQUIRED_LIBRARIES ${PTHREAD_LIBRARY})
+set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+find_package(Threads REQUIRED)
+set(PTHREAD_LIBRARY Threads::Threads)
+list(APPEND CMAKE_REQUIRED_LIBRARIES Threads::Threads)
+
+check_include_files("sys/queue.h" HAVE_SYS_QUEUE_H)
+if (NOT HAVE_SYS_QUEUE_H)
+	include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src/compat")
+endif()
 
 ############################# MACRO SECTION ############################
 macro(try_c_flag prop flag)
@@ -149,6 +156,10 @@ endif()
 
 try_c_flag(PIPE				"-pipe")
 try_c_flag(NO_DEL_NULL_PTR_CHKS		"-fno-delete-null-pointer-checks")
+# Zig enables -Werror=date-time when SOURCE_DATE_EPOCH is set by reproducible
+# build environments. Keep the legacy build timestamp without breaking those
+# builds. This must apply to Release builds and the included liblcb sources too.
+try_c_flag(WDATE_TIME			"-Wno-date-time")
 
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
@@ -167,7 +178,6 @@ if (CMAKE_BUILD_TYPE MATCHES "Debug")
 
 	try_c_flag(WCAST_FN_TYPE_STRICT	"-Wno-cast-function-type-strict")
 	try_c_flag(WCAST_QUAL		"-Wno-cast-qual")
-	try_c_flag(WDATE_TIME		"-Wno-date-time")
 	try_c_flag(WDOCUMENTATION	"-Wno-documentation")
 	try_c_flag(WDOC_UNKNOWN_CMD	"-Wno-documentation-unknown-command")
 	try_c_flag(WFORMAT_NONLITERAL	"-Wno-format-nonliteral")
@@ -213,7 +223,12 @@ endif()
 # Hardening flags
 try_c_flag(FORTIFY_SOURCE2		"-D_FORTIFY_SOURCE=2")
 try_c_flag(FSTACK_PROTECTOR_ALL		"-fstack-protector-all")
-try_c_flag(FSANITIZE_SAFE_STACK		"-fsanitize=safe-stack")
+# A cross compiler can accept SafeStack while lacking its target runtime.
+# In that case the flag probe succeeds, but the real executable fails to link
+# with an unresolved __safestack_unsafe_stack_ptr.
+if (NOT CMAKE_CROSSCOMPILING)
+	try_c_flag(FSANITIZE_SAFE_STACK	"-fsanitize=safe-stack")
+endif()
 try_c_flag(FSANITIZE_CFI		"-fsanitize=cfi")
 try_c_flag(MRETPOLINE			"-mretpoline")
 try_c_flag(MFUNCTION_RETURN		"-mfunction-return=thunk")
