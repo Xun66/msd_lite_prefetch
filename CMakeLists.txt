@@ -45,8 +45,10 @@ include(CheckFunctionExists)
 include(CheckSymbolExists)
 include(CheckCCompilerFlag)
 
-find_library(PTHREAD_LIBRARY pthread)
-list(APPEND CMAKE_REQUIRED_LIBRARIES ${PTHREAD_LIBRARY})
+set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+find_package(Threads REQUIRED)
+set(PTHREAD_LIBRARY Threads::Threads)
+list(APPEND CMAKE_REQUIRED_LIBRARIES Threads::Threads)
 
 check_include_files("sys/queue.h" HAVE_SYS_QUEUE_H)
 if (NOT HAVE_SYS_QUEUE_H)
