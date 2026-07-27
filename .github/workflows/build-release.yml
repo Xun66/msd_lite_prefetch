@@ -55,7 +55,7 @@ jobs:
           - arch: armv7
             target: arm-linux-musleabihf
           - arch: mipsel
-            target: mipsel-linux-musl
+            target: mipsel-linux-musleabi
     steps:
       - uses: actions/checkout@v4
         with:

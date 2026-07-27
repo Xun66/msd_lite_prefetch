@@ -156,6 +156,10 @@ endif()
 
 try_c_flag(PIPE				"-pipe")
 try_c_flag(NO_DEL_NULL_PTR_CHKS		"-fno-delete-null-pointer-checks")
+# Zig enables -Werror=date-time when SOURCE_DATE_EPOCH is set by reproducible
+# build environments. Keep the legacy build timestamp without breaking those
+# builds. This must apply to Release builds and the included liblcb sources too.
+try_c_flag(WDATE_TIME			"-Wno-date-time")
 
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
@@ -174,7 +178,6 @@ if (CMAKE_BUILD_TYPE MATCHES "Debug")
 
 	try_c_flag(WCAST_FN_TYPE_STRICT	"-Wno-cast-function-type-strict")
 	try_c_flag(WCAST_QUAL		"-Wno-cast-qual")
-	try_c_flag(WDATE_TIME		"-Wno-date-time")
 	try_c_flag(WDOCUMENTATION	"-Wno-documentation")
 	try_c_flag(WDOC_UNKNOWN_CMD	"-Wno-documentation-unknown-command")
 	try_c_flag(WFORMAT_NONLITERAL	"-Wno-format-nonliteral")
