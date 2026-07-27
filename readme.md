@@ -32,12 +32,118 @@ Support the author
 * Not available options URL: precache and blocksize
 * Zero Copy on Send (ZCoS) is always on
 * No polling to send out to clients fUsePollingForSend
-* No analyzer MPEG2-TS stream, and “smart” shipping MPEG2-TS header new clients
+* Lightweight MPEG2-TS/GOP analyzer for smart startup of new clients
+
+
+## Channel prediction and GOP warmup
+
+This fork can keep likely channel-change targets warm.  It learns transitions
+per viewer IP address and maintains a bounded channel index plus directed
+transition entries:
+
+```
+current channel -> most likely next channel 1, next channel 2
+current channel -> most likely previous channel
+```
+
+Counts and last-seen times are held in memory. Stale transition and viewer
+entries are removed after `entryTTL`; table sizes are bounded by
+`maxChannels` and `maxEntries`. Channels and transition edges are atomically
+saved to `stateFile` every ten minutes when changed and once during a clean
+shutdown, then restored after a daemon restart. Per-viewer
+"currently tuned channel" data is deliberately not persisted, so a new TV
+session is not treated as a transition from the channel watched before
+shutdown.
+
+`stateFile` is an internal compact binary format. Its header contains the
+`MSDP` magic, a format version, and bounded channel/edge counts; incompatible
+or malformed files are rejected rather than partially loaded.
+
+Warm hubs join the multicast source using the address after `/udp/` in the
+request URL.  The stream remains compressed: a small built-in parser reads
+MPEG-TS PAT/PMT tables and recognizes H.264 IDR and H.265 BLA/IDR/CRA NAL
+units.  It does not decode YUV frames and it does not require FFmpeg.  A new
+HTTP client starts at the most recent PAT/PMT cycle preceding a random-access
+GOP, then catches up to the live write position through the existing
+zero-copy ring buffer.
+
+Example:
+
+```xml
+<prefetch>
+	<fEnable>yes</fEnable>
+	<fPrevious>yes</fPrevious>
+	<nextCount>1</nextCount>
+	<previousCount>1</previousCount>
+	<minObservations>2</minObservations>
+	<maxChannels>512</maxChannels>
+	<maxEntries>4096</maxEntries>
+	<entryTTL>604800</entryTTL>
+	<maxEntryTTL>2592000</maxEntryTTL>
+	<protectedPerChannel>4</protectedPerChannel>
+	<observationCap>25</observationCap>
+	<idleTimeout>60</idleTimeout>
+	<stateFile>/etc/msd_lite/prefetch.state</stateFile>
+</prefetch>
+```
+
+`nextCount` accepts 0..2. `previousCount` accepts 0..1. With both set to one,
+at most one predicted forward hub and one reverse-predicted hub are retained
+in addition to channels that have real clients. Set `fEnable` to `no` for
+the original cold-request lifecycle, or `fPrevious` to `no` to disable the
+reverse model. Transition expiry grows in `entryTTL` steps based on
+`floor(log2(count))`, up to `maxEntryTTL`. Each source channel independently
+keeps its strongest `protectedPerChannel` outgoing transitions forever; ties
+prefer the most recently observed transition. Set `protectedPerChannel` to
+zero to disable permanent retention. `observationCap` is a saturating counter;
+after competing paths reach the cap, the most recently observed path wins
+ties. Set it to zero for unlimited historical counts. For 40 Mbit/s streams with a one-second
+GOP, use at least an
+8 MiB `ringBufSize`; the supplied configuration does so. If no real HTTP
+stream client remains for `idleTimeout` seconds, all predicted warm hubs are
+released. A value of zero disables this idle timeout.
+
+### Training behavior
+
+For each viewer IP, tuning from A to B increments the directed A-to-B edge
+and refreshes its last-seen time. Reverse prediction does not train a second
+graph: the previous channel for B is selected from incoming edges ending at
+B. Edge counts saturate at `observationCap`, avoiding old schedules becoming
+impossible to replace. For equal counts, the most recently observed edge
+wins.
+
+Every source channel has its own permanent Top-N set, controlled by
+`protectedPerChannel`. These edges do not expire while they remain in that
+channel's Top-N. Other edges receive a count-dependent TTL, capped by
+`maxEntryTTL`, and can challenge the protected set through repeated use.
+
+To clear learned state, stop the daemon first, remove the configured
+`stateFile`, and restart it. Removing the file while the daemon is running is
+not sufficient because the in-memory graph can write it again:
+
+```sh
+/etc/init.d/msd_lite stop
+rm /etc/msd_lite/prefetch.state
+/etc/init.d/msd_lite start
+```
+
+Adjust the path if `stateFile` points elsewhere. Per-viewer current-channel
+positions are intentionally memory-only and are cleared by every restart.
 
 
 
 
 ## Compilation and Installation
+
+The top-level Makefile is a small CMake wrapper:
+
+```sh
+make -j4
+make test
+```
+
+Direct CMake builds remain supported:
+
 ```
 sudo apt-get install build-essential git cmake fakeroot
 git clone --recursive https://github.com/rozhuk-im/msd_lite.git
@@ -90,4 +196,3 @@ Run:
 ```
 service msd_lite restart
 ```
-

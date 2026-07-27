@@ -95,6 +95,7 @@ struct prog_settings {
 	str_hub_settings_t	hub_params; /* Stream hub params. */
 	str_src_settings_t	src_params; /* Stream hub source params. */
 	str_src_conn_params_t	src_conn_params; /* Stream hub source connection params. */
+	str_prefetch_settings_t	prefetch_params;
 
 	uintptr_t	log_fd;		// log file descriptor
 };
@@ -108,6 +109,8 @@ int		msd_src_profile_load(const uint8_t *data, size_t data_size,
 		    str_src_settings_p params);
 int		msd_src_conn_profile_load(const uint8_t *data, size_t data_size,
 		    void *conn_params);
+int		msd_prefetch_profile_load(const uint8_t *data, size_t data_size,
+		    str_prefetch_settings_p params);
 
 
 
@@ -272,6 +275,56 @@ msd_src_conn_profile_load(const uint8_t *data, size_t data_size, void *conn) {
 	return (0);
 }
 
+int
+msd_prefetch_profile_load(const uint8_t *data, size_t data_size,
+    str_prefetch_settings_p params) {
+	const uint8_t *ptm;
+	size_t tm;
+
+	if (NULL == data || 0 == data_size || NULL == params)
+		return (EINVAL);
+	if (0 == xml_get_val_args(data, data_size, NULL, NULL, NULL,
+	    &ptm, &tm, (const uint8_t*)"fEnable", NULL))
+		yn_set_flag32(ptm, tm, STR_PREFETCH_F_ENABLE, &params->flags);
+	if (0 == xml_get_val_args(data, data_size, NULL, NULL, NULL,
+	    &ptm, &tm, (const uint8_t*)"fPrevious", NULL))
+		yn_set_flag32(ptm, tm, STR_PREFETCH_F_PREVIOUS, &params->flags);
+	xml_get_val_uint32_args(data, data_size, NULL, &params->next_count,
+	    (const uint8_t*)"nextCount", NULL);
+	xml_get_val_uint32_args(data, data_size, NULL, &params->previous_count,
+	    (const uint8_t*)"previousCount", NULL);
+	xml_get_val_uint32_args(data, data_size, NULL, &params->min_observations,
+	    (const uint8_t*)"minObservations", NULL);
+	xml_get_val_size_t_args(data, data_size, NULL, &params->max_channels,
+	    (const uint8_t*)"maxChannels", NULL);
+	xml_get_val_size_t_args(data, data_size, NULL, &params->max_entries,
+	    (const uint8_t*)"maxEntries", NULL);
+	xml_get_val_uint64_args(data, data_size, NULL, &params->entry_ttl,
+	    (const uint8_t*)"entryTTL", NULL);
+	xml_get_val_uint64_args(data, data_size, NULL, &params->max_entry_ttl,
+	    (const uint8_t*)"maxEntryTTL", NULL);
+	xml_get_val_size_t_args(data, data_size, NULL,
+	    &params->protected_per_channel,
+	    (const uint8_t*)"protectedPerChannel", NULL);
+	xml_get_val_uint64_args(data, data_size, NULL, &params->observation_cap,
+	    (const uint8_t*)"observationCap", NULL);
+	xml_get_val_uint64_args(data, data_size, NULL, &params->idle_timeout,
+	    (const uint8_t*)"idleTimeout", NULL);
+	if (0 == xml_get_val_args(data, data_size, NULL, NULL, NULL,
+	    &ptm, &tm, (const uint8_t*)"stateFile", NULL)) {
+		tm = MIN(tm, STR_PREFETCH_STATE_FILE_MAX);
+		memcpy(params->state_file, ptm, tm);
+		params->state_file[tm] = 0;
+	}
+	params->next_count = MIN(params->next_count, 2);
+	params->previous_count = MIN(params->previous_count, 1);
+	params->protected_per_channel =
+	    MIN(params->protected_per_channel, params->max_entries);
+	if (params->max_entry_ttl < params->entry_ttl)
+		params->max_entry_ttl = params->entry_ttl;
+	return (0);
+}
+
 
 
 int
@@ -396,6 +449,7 @@ main(int argc, char *argv[]) {
 	/* Stream source defaults params. */
 	str_src_conn_def(&g_data.src_conn_params);
 	str_src_settings_def(&g_data.src_params);
+	str_prefetch_settings_def(&g_data.prefetch_params);
 
 	/* Stream hub params. */
 	if (0 == MSD_CFG_GET_VAL_DATA(NULL, &data, &data_size,
@@ -408,8 +462,13 @@ main(int argc, char *argv[]) {
 		msd_src_profile_load(data, data_size, &g_data.src_params);
 		msd_src_conn_profile_load(data, data_size, &g_data.src_conn_params);
 	}
+	if (0 == MSD_CFG_GET_VAL_DATA(NULL, &data, &data_size,
+	    "prefetch", NULL)) {
+		msd_prefetch_profile_load(data, data_size,
+		    &g_data.prefetch_params);
+	}
 	error = str_hubs_bckt_create(tp, PACKAGE_NAME"/"PACKAGE_VERSION, &g_data.hub_params,
-	    &g_data.src_params, &g_data.shbskt);
+	    &g_data.src_params, &g_data.prefetch_params, &g_data.shbskt);
 	if (0 != error) {
 		SYSLOG_ERR(LOG_CRIT, error, "str_hubs_bckt_create().");
 		goto err_out;

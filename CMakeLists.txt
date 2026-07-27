@@ -48,6 +48,11 @@ include(CheckCCompilerFlag)
 find_library(PTHREAD_LIBRARY pthread)
 list(APPEND CMAKE_REQUIRED_LIBRARIES ${PTHREAD_LIBRARY})
 
+check_include_files("sys/queue.h" HAVE_SYS_QUEUE_H)
+if (NOT HAVE_SYS_QUEUE_H)
+	include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src/compat")
+endif()
+
 ############################# MACRO SECTION ############################
 macro(try_c_flag prop flag)
 	# Try flag once on the C compiler
