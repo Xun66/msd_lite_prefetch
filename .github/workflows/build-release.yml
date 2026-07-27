@@ -1,0 +1,136 @@
+name: build-and-release
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DENABLE_TESTS=ON
+      - name: Build
+        run: cmake --build build --parallel 4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Prepare binary
+        run: |
+          install -Dm755 build/src/msd_lite dist/msd_lite-linux-x86_64
+          file dist/msd_lite-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/msd_lite-linux-x86_64
+          if-no-files-found: error
+
+  openwrt:
+    name: OpenWrt ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-linux-musl
+          - arch: aarch64
+            target: aarch64-linux-musl
+          - arch: armv7
+            target: arm-linux-musleabihf
+          - arch: mipsel
+            target: mipsel-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - name: Create cross compiler wrapper
+        env:
+          ZIG_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/toolchain"
+          printf '#!/bin/sh\nexec zig cc -target %s "$@"\n' "$ZIG_TARGET" \
+            > "$RUNNER_TEMP/toolchain/cc"
+          chmod +x "$RUNNER_TEMP/toolchain/cc"
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_C_COMPILER="$RUNNER_TEMP/toolchain/cc" \
+            -DCMAKE_EXE_LINKER_FLAGS=-static
+      - name: Build
+        run: cmake --build build --parallel 4
+      - name: Prepare binary
+        run: |
+          install -Dm755 build/src/msd_lite \
+            dist/msd_lite-openwrt-${{ matrix.arch }}
+          file dist/msd_lite-openwrt-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ matrix.arch }}
+          path: dist/msd_lite-openwrt-${{ matrix.arch }}
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify architecture
+        run: test "$(uname -m)" = arm64
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=$BUILD_TYPE
+      - name: Build
+        run: cmake --build build --parallel 4
+      - name: Prepare binary
+        run: |
+          install -m755 build/src/msd_lite dist-msd_lite
+          mkdir dist
+          mv dist-msd_lite dist/msd_lite-macos-arm64
+          file dist/msd_lite-macos-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/msd_lite-macos-arm64
+          if-no-files-found: error
+
+  release:
+    name: Publish clean binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, openwrt, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List release files
+        run: find dist -maxdepth 1 -type f -printf '%f\n' | sort
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

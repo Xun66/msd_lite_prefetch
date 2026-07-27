@@ -164,6 +164,24 @@ cmake --build . --config Release -j 16
 ctest -C Release --output-on-failure -j 16
 ```
 
+## Release binaries
+
+GitHub Actions builds:
+
+* Linux x86_64
+* OpenWrt-compatible static musl binaries for x86_64, aarch64, armv7, and
+  mipsel
+* macOS arm64
+
+Pushes and pull requests only validate builds. Pushing a tag such as `v1.11.0`
+creates a GitHub Release containing only the named executables. The workflow
+does not publish blockmaps, updater YAML, installers, or build directories.
+
+Native Windows x64 is not currently published. The daemon depends on POSIX
+process, socket, pthread, syslog, and queue APIs; a real Windows build requires
+a maintained Win32 compatibility layer rather than merely cross-compiling the
+current source.
+
 
 ## Usage
 ```
