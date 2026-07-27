@@ -1,73 +1,62 @@
-# msd_lite
+# msd_lite prefetch
 
-[![Build-macOS-latest Actions Status](https://github.com/rozhuk-im/msd_lite/workflows/build-macos-latest/badge.svg)](https://github.com/rozhuk-im/msd_lite/actions)
-[![Build-Ubuntu-latest Actions Status](https://github.com/rozhuk-im/msd_lite/workflows/build-ubuntu-latest/badge.svg)](https://github.com/rozhuk-im/msd_lite/actions)
+[中文说明](readme_zh.md) · [Advanced operation and development](docs/README.md) · [Releases](https://github.com/Xun66/msd_lite_prefetch/releases)
 
+This fork adds learned channel prediction and GOP-aware warmup to
+[rozhuk-im/msd_lite](https://github.com/rozhuk-im/msd_lite). It receives
+UDP/RTP multicast MPEG-TS and serves it over HTTP. H.264 and H.265 streams are
+parsed without decoding video and without an FFmpeg runtime dependency.
 
-Rozhuk Ivan <rozhuk.im@gmail.com> 2011-2026
+When a viewer changes from channel A to B, the daemon learns the directed
+transition. It can keep the most likely next channel and, optionally, the most
+likely previous channel warm. A new client starts from the latest usable
+PAT/PMT plus random-access GOP, reducing cold channel-change latency.
 
-msd_lite - Multi stream daemon lite.
-This lightweight version of Multi Stream daemon (msd)
-Program for organizing IP TV streaming on the network via HTTP.
+## Download
 
+Each tagged release contains only the executables:
 
-## Licence
-BSD licence.
-Website: http://www.netlab.linkpc.net/wiki/en:software:msd:lite
+- Linux x86_64
+- OpenWrt x86_64, aarch64, armv7, and mipsel
+- macOS arm64
 
+Choose the OpenWrt file that matches `uname -m`.
 
-## Donate
-Support the author
-* **GitHub Sponsors:** [!["GitHub Sponsors"](https://camo.githubusercontent.com/220b7d46014daa72a2ab6b0fcf4b8bf5c4be7289ad4b02f355d5aa8407eb952c/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f2d53706f6e736f722d6661666266633f6c6f676f3d47697448756225323053706f6e736f7273)](https://github.com/sponsors/rozhuk-im) <br/>
-* **Buy Me A Coffee:** [!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/rojuc) <br/>
-* **PayPal:** [![PayPal](https://srv-cdn.himpfen.io/badges/paypal/paypal-flat.svg)](https://paypal.me/rojuc) <br/>
-* **Bitcoin (BTC):** `1AxYyMWek5vhoWWRTWKQpWUqKxyfLarCuz` <br/>
+## OpenWrt quick install
 
+Existing XML remains compatible. Without a `<prefetch>` section, the new
+binary keeps the original cold-request behavior.
 
-## Features
-* Open source
-* BSD License
-* No deadlocks threads during operation
-* Receiving only udp-multicast, including rtp streams
-* Not available options URL: precache and blocksize
-* Zero Copy on Send (ZCoS) is always on
-* No polling to send out to clients fUsePollingForSend
-* Lightweight MPEG2-TS/GOP analyzer for smart startup of new clients
+Find the actual program and configuration first:
 
-
-## Channel prediction and GOP warmup
-
-This fork can keep likely channel-change targets warm.  It learns transitions
-per viewer IP address and maintains a bounded channel index plus directed
-transition entries:
-
-```
-current channel -> most likely next channel 1, next channel 2
-current channel -> most likely previous channel
+```sh
+uname -m
+command -v msd_lite
+ps w | grep '[m]sd_lite'
 ```
 
-Counts and last-seen times are held in memory. Stale transition and viewer
-entries are removed after `entryTTL`; table sizes are bounded by
-`maxChannels` and `maxEntries`. Channels and transition edges are atomically
-saved to `stateFile` every ten minutes when changed and once during a clean
-shutdown, then restored after a daemon restart. Per-viewer
-"currently tuned channel" data is deliberately not persisted, so a new TV
-session is not treated as a transition from the channel watched before
-shutdown.
+A typical installation uses `/usr/bin/msd_lite`. Back it up and replace it:
 
-`stateFile` is an internal compact binary format. Its header contains the
-`MSDP` magic, a format version, and bounded channel/edge counts; incompatible
-or malformed files are rejected rather than partially loaded.
+```sh
+/etc/init.d/msd_lite stop
+cp -p /usr/bin/msd_lite /usr/bin/msd_lite.before-prefetch
+cp /tmp/msd_lite-openwrt-x86_64 /usr/bin/msd_lite
+chmod 755 /usr/bin/msd_lite
+/etc/init.d/msd_lite start
+```
 
-Warm hubs join the multicast source using the address after `/udp/` in the
-request URL.  The stream remains compressed: a small built-in parser reads
-MPEG-TS PAT/PMT tables and recognizes H.264 IDR and H.265 BLA/IDR/CRA NAL
-units.  It does not decode YUV frames and it does not require FFmpeg.  A new
-HTTP client starts at the most recent PAT/PMT cycle preceding a random-access
-GOP, then catches up to the live write position through the existing
-zero-copy ring buffer.
+Use the matching `aarch64`, `armv7`, or `mipsel` file where appropriate.
+There is no opkg package for this fork yet. A firmware upgrade or reinstall of
+the upstream package may overwrite the manually replaced executable.
 
-Example:
+OpenWrt packages commonly generate XML under `/var/run/msd_lite/`. Do not edit
+that generated file. Edit the persistent template (commonly
+`/etc/msd_lite/msd_lite.conf.sample`) or use a dedicated configuration passed
+with `-c`.
+
+## Recommended prefetch configuration
+
+Add this block directly under the root `<msd>` element:
 
 ```xml
 <prefetch>
@@ -87,39 +76,20 @@ Example:
 </prefetch>
 ```
 
-`nextCount` accepts 0..2. `previousCount` accepts 0..1. With both set to one,
-at most one predicted forward hub and one reverse-predicted hub are retained
-in addition to channels that have real clients. Set `fEnable` to `no` for
-the original cold-request lifecycle, or `fPrevious` to `no` to disable the
-reverse model. Transition expiry grows in `entryTTL` steps based on
-`floor(log2(count))`, up to `maxEntryTTL`. Each source channel independently
-keeps its strongest `protectedPerChannel` outgoing transitions forever; ties
-prefer the most recently observed transition. Set `protectedPerChannel` to
-zero to disable permanent retention. `observationCap` is a saturating counter;
-after competing paths reach the cap, the most recently observed path wins
-ties. Set it to zero for unlimited historical counts. For 40 Mbit/s streams with a one-second
-GOP, use at least an
-8 MiB `ringBufSize`; the supplied configuration does so. If no real HTTP
-stream client remains for `idleTimeout` seconds, all predicted warm hubs are
-released. A value of zero disables this idle timeout.
+For streams up to 40 Mbit/s with a one-second GOP, set:
 
-### Training behavior
+```xml
+<ringBufSize>8192</ringBufSize>
+```
 
-For each viewer IP, tuning from A to B increments the directed A-to-B edge
-and refreshes its last-seen time. Reverse prediction does not train a second
-graph: the previous channel for B is selected from incoming edges ending at
-B. Edge counts saturate at `observationCap`, avoiding old schedules becoming
-impossible to replace. For equal counts, the most recently observed edge
-wins.
+The supplied [`conf/msd_lite.conf`](conf/msd_lite.conf) already contains these
+settings. Replace its multicast interface name with the interface used by your
+IPTV source.
 
-Every source channel has its own permanent Top-N set, controlled by
-`protectedPerChannel`. These edges do not expire while they remain in that
-channel's Top-N. Other edges receive a count-dependent TTL, capped by
-`maxEntryTTL`, and can challenge the protected set through repeated use.
+## Clear learned transitions
 
-To clear learned state, stop the daemon first, remove the configured
-`stateFile`, and restart it. Removing the file while the daemon is running is
-not sufficient because the in-memory graph can write it again:
+Stop the daemon before deleting the state. Otherwise the in-memory model may
+write it back:
 
 ```sh
 /etc/init.d/msd_lite stop
@@ -127,137 +97,30 @@ rm /etc/msd_lite/prefetch.state
 /etc/init.d/msd_lite start
 ```
 
-Adjust the path if `stateFile` points elsewhere. Per-viewer current-channel
-positions are intentionally memory-only and are cleared by every restart.
-
-
-
-
-## Compilation and Installation
-
-The top-level Makefile is a small CMake wrapper:
+## Build and test
 
 ```sh
+git clone --recursive https://github.com/Xun66/msd_lite_prefetch.git
+cd msd_lite_prefetch
 make -j4
 make test
 ```
 
-Direct CMake builds remain supported:
-
-```
-sudo apt-get install build-essential git cmake fakeroot
-git clone --recursive https://github.com/rozhuk-im/msd_lite.git
-cd msd_lite
-mkdir build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_VERBOSE_MAKEFILE=true ..
-make -j 8
-```
-
-### Manual OpenWrt installation
-
-There is currently no official opkg package for this fork. Existing msd_lite
-XML configuration remains compatible. If the old configuration has no
-`<prefetch>` section, replacing only the executable preserves the original
-cold-request behavior. Enabling prediction requires adding the `<prefetch>`
-section shown above. For high-bitrate streams, also change `ringBufSize` from
-the upstream 1024 KiB default to 8192 KiB so a complete GOP fits in the ring.
-
-Find the executable and active configuration instead of assuming paths:
-
-```sh
-command -v msd_lite
-ps w | grep '[m]sd_lite'
-```
-
-On a typical OpenWrt installation the executable is
-`/usr/bin/msd_lite`. Back it up, install the binary matching the router CPU,
-and restart the service:
-
-```sh
-/etc/init.d/msd_lite stop
-cp -p /usr/bin/msd_lite /usr/bin/msd_lite.upstream
-install -m 0755 /tmp/msd_lite-openwrt-x86_64 /usr/bin/msd_lite
-mkdir -p /etc/msd_lite
-/etc/init.d/msd_lite start
-```
-
-Use the `aarch64`, `armv7`, or `mipsel` release binary instead on those
-architectures. Check with `uname -m` before replacing anything. Some OpenWrt
-packages generate a temporary XML file under `/var/run`; do not edit that
-generated file because it will be overwritten. Change the package's persistent
-configuration/template, or launch this fork with a dedicated XML file using
-`-c`.
-
-To roll back:
-
-```sh
-/etc/init.d/msd_lite stop
-cp -p /usr/bin/msd_lite.upstream /usr/bin/msd_lite
-/etc/init.d/msd_lite start
-```
-
-A future firmware or opkg upgrade may overwrite the manually installed
-binary, so retain the release binary and repeat the replacement after an
-upgrade if necessary.
-
-
-## Run tests
-```
-mkdir -p build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=1 ..
-cmake --build . --config Release -j 16
-ctest -C Release --output-on-failure -j 16
-```
-
-## Release binaries
-
-GitHub Actions builds:
-
-* Linux x86_64
-* OpenWrt-compatible static musl binaries for x86_64, aarch64, armv7, and
-  mipsel
-* macOS arm64
-
-Pushes and pull requests only validate builds. Pushing a tag such as `v1.11.0`
-creates a GitHub Release containing only the named executables. The workflow
-does not publish blockmaps, updater YAML, installers, or build directories.
-
-Native Windows x64 is not currently published. The daemon depends on POSIX
-process, socket, pthread, syslog, and queue APIs; a real Windows build requires
-a maintained Win32 compatibility layer rather than merely cross-compiling the
-current source.
-
+For training details, tuning, persistence format, every file touched on
+OpenWrt, rollback instructions, benchmarks, source layout, and CI targets, see
+the [advanced guide](docs/README.md).
 
 ## Usage
-```
+
+```text
 msd_lite [-d] [-v] [-c file]
-       [-p PID file] [-u uid|usr -g gid|grp]
- -h           usage (this screen)
- -d           become daemon
- -c file      config file
- -p PID file  file name to store PID
- -u uid|user  change uid
- -g gid|group change gid
- -v           verboce
+         [-p PID-file] [-u uid|user -g gid|group]
 ```
 
+## License and upstream author
 
-## Setup
+BSD License. Original msd_lite by Rozhuk Ivan
+<rozhuk.im@gmail.com>, 2011–2026.
 
-### msd_lite
-Copy %%ETCDIR%%/msd_lite.conf.sample to %%ETCDIR%%/msd_lite.conf
-then replace lan0 with your network interface name.
-Add more sections if needed.
-Remove IPv4/IPv6 lines if not needed.
-
-Add to /etc/rc.conf:
-```
-msd_lite_enable="YES"
-```
-
-Run:
-```
-service msd_lite restart
-```
+Upstream website:
+<http://www.netlab.linkpc.net/wiki/en:software:msd:lite>
