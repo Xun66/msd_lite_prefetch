@@ -156,7 +156,7 @@ typedef struct str_prefetch_settings_s {
 
 #define STR_PREFETCH_F_ENABLE		(((uint32_t)1) << 0)
 #define STR_PREFETCH_F_PREVIOUS		(((uint32_t)1) << 1)
-#define STR_PREFETCH_DEF_FLAGS		(STR_PREFETCH_F_ENABLE | STR_PREFETCH_F_PREVIOUS)
+#define STR_PREFETCH_DEF_FLAGS		0 /* Old configs retain the cold-request behavior. */
 #define STR_PREFETCH_DEF_NEXT_COUNT	1
 #define STR_PREFETCH_DEF_PREVIOUS_COUNT	1
 #define STR_PREFETCH_DEF_MIN_OBSERVATIONS 2

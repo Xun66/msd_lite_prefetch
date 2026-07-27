@@ -154,6 +154,53 @@ cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_VERBOSE_MAKEFILE=true ..
 make -j 8
 ```
 
+### Manual OpenWrt installation
+
+There is currently no official opkg package for this fork. Existing msd_lite
+XML configuration remains compatible. If the old configuration has no
+`<prefetch>` section, replacing only the executable preserves the original
+cold-request behavior. Enabling prediction requires adding the `<prefetch>`
+section shown above. For high-bitrate streams, also change `ringBufSize` from
+the upstream 1024 KiB default to 8192 KiB so a complete GOP fits in the ring.
+
+Find the executable and active configuration instead of assuming paths:
+
+```sh
+command -v msd_lite
+ps w | grep '[m]sd_lite'
+```
+
+On a typical OpenWrt installation the executable is
+`/usr/bin/msd_lite`. Back it up, install the binary matching the router CPU,
+and restart the service:
+
+```sh
+/etc/init.d/msd_lite stop
+cp -p /usr/bin/msd_lite /usr/bin/msd_lite.upstream
+install -m 0755 /tmp/msd_lite-openwrt-x86_64 /usr/bin/msd_lite
+mkdir -p /etc/msd_lite
+/etc/init.d/msd_lite start
+```
+
+Use the `aarch64`, `armv7`, or `mipsel` release binary instead on those
+architectures. Check with `uname -m` before replacing anything. Some OpenWrt
+packages generate a temporary XML file under `/var/run`; do not edit that
+generated file because it will be overwritten. Change the package's persistent
+configuration/template, or launch this fork with a dedicated XML file using
+`-c`.
+
+To roll back:
+
+```sh
+/etc/init.d/msd_lite stop
+cp -p /usr/bin/msd_lite.upstream /usr/bin/msd_lite
+/etc/init.d/msd_lite start
+```
+
+A future firmware or opkg upgrade may overwrite the manually installed
+binary, so retain the release binary and repeat the replacement after an
+upgrade if necessary.
+
 
 ## Run tests
 ```
