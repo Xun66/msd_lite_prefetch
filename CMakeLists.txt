@@ -223,7 +223,12 @@ endif()
 # Hardening flags
 try_c_flag(FORTIFY_SOURCE2		"-D_FORTIFY_SOURCE=2")
 try_c_flag(FSTACK_PROTECTOR_ALL		"-fstack-protector-all")
-try_c_flag(FSANITIZE_SAFE_STACK		"-fsanitize=safe-stack")
+# A cross compiler can accept SafeStack while lacking its target runtime.
+# In that case the flag probe succeeds, but the real executable fails to link
+# with an unresolved __safestack_unsafe_stack_ptr.
+if (NOT CMAKE_CROSSCOMPILING)
+	try_c_flag(FSANITIZE_SAFE_STACK	"-fsanitize=safe-stack")
+endif()
 try_c_flag(FSANITIZE_CFI		"-fsanitize=cfi")
 try_c_flag(MRETPOLINE			"-mretpoline")
 try_c_flag(MFUNCTION_RETURN		"-mfunction-return=thunk")
